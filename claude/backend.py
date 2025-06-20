@@ -51,7 +51,6 @@ class AgentState(TypedDict):
     final_plan: Optional[str]
     workflow_status: str
     needs_rerun: bool  # Flag to indicate if workflow needs to restart
-    last_update_handled: bool  # Track if the last update was processed
 
 
 @dataclass
@@ -84,10 +83,27 @@ class WebSocketManager:
                 print(f"Error sending WebSocket message: {e}")
                 self.disconnect(session_id)
 
+    async def send_message_with_context(
+        self, session_id: str, message: str, message_type: str = "update", context: dict = None
+    ):
+        if session_id in self.connections:
+            try:
+                response = {
+                    "type": message_type,
+                    "content": message,
+                    "timestamp": datetime.now().isoformat(),
+                    "context": context or {},
+                }
+                await self.connections[session_id].send_text(json.dumps(response))
+                print(f"Sent WebSocket message with context to {session_id}: {message[:100]}...")
+            except Exception as e:
+                print(f"Error sending WebSocket message: {e}")
+                self.disconnect(session_id)
+
 
 # Initialize components
 websocket_manager = WebSocketManager()
-llm = ChatOpenAI(model="gpt-4", temperature=0.7)
+llm = ChatOpenAI(model="gpt-4.1", temperature=0.7)
 search_tool = DuckDuckGoSearchRun()
 
 # Store active workflows for updates
@@ -272,7 +288,6 @@ async def requirement_evaluation_node(state: AgentState) -> AgentState:
                 "status_update",
             )
 
-    state["last_update_handled"] = True
     return state
 
 
@@ -320,7 +335,9 @@ async def exercise_search_node(state: AgentState) -> AgentState:
 
     # Notify via WebSocket
     await websocket_manager.send_message(
-        state["session_id"], "Found exercises and training schedules. Creating your personalized plan...", "search_update"
+        state["session_id"],
+        "Found exercises and training schedules. Creating your personalized plan...",
+        "search_update",
     )
 
     return state
@@ -342,10 +359,37 @@ async def summarization_node(state: AgentState) -> AgentState:
     state["workflow_status"] = WorkflowStatus.COMPLETED.value
     state["needs_rerun"] = False
 
-    # Send final plan via WebSocket
+    # Send final plan via WebSocket with requirement context
     plan_type = "updated plan" if is_update else "plan"
     final_message = f"Here is your {plan_type}:\n\n{final_plan}"
-    await websocket_manager.send_message(state["session_id"], final_message, "final_plan")
+
+    # Create requirement context with correct numbering
+    current_req = state["user_request"]
+    req_position = 0
+
+    # Find which requirement this plan actually addresses
+    for i, req in enumerate(state["requirements_history"]):
+        if req == current_req:
+            req_position = i
+            break
+
+    # Get previous requirement (if exists)
+    previous_req = None
+    if req_position > 0:
+        previous_req = state["requirements_history"][req_position - 1]
+
+    requirement_context = {
+        "requirement_number": req_position + 1,
+        "requirement_text": current_req,
+        "previous_request": previous_req,
+        "original_request": state["original_request"],
+        "is_update": is_update,
+        "total_requirements": len(state["requirements_history"]),
+    }
+
+    await websocket_manager.send_message_with_context(
+        state["session_id"], final_message, "final_plan", requirement_context
+    )
 
     # Add final message to state
     final_message_obj = AIMessage(content=final_plan)
@@ -356,10 +400,6 @@ async def summarization_node(state: AgentState) -> AgentState:
 
 def should_continue(state: AgentState) -> str:
     """Determine next step in the workflow"""
-    # If we have unprocessed updates, evaluate requirements first
-    if not state.get("last_update_handled", True):
-        return "evaluate_requirements"
-
     # If we need results and don't have them, go to search
     if not state.get("exercise_results") and state.get("needs_rerun", True):
         return "search"
@@ -452,7 +492,6 @@ async def chat_endpoint(request: ChatRequest):
         current_state["user_request"] = user_message
         current_state["requirements_history"] = current_state.get("requirements_history", [])
         current_state["requirements_history"].append(user_message)
-        current_state["last_update_handled"] = False
 
         # Add new user message
         if "messages" not in current_state:
@@ -483,7 +522,6 @@ async def chat_endpoint(request: ChatRequest):
             "final_plan": None,
             "workflow_status": WorkflowStatus.INITIAL.value,
             "needs_rerun": True,
-            "last_update_handled": True,
         }
 
         # Start async processing
@@ -584,7 +622,6 @@ async def handle_websocket_update(session_id: str, new_requirements: str):
         # Update requirements
         current_state["user_request"] = new_requirements
         current_state["requirements_history"].append(new_requirements)
-        current_state["last_update_handled"] = False
         current_state["messages"].append(HumanMessage(content=new_requirements))
 
         # Process the update

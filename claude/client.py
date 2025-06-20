@@ -75,6 +75,7 @@ class DynamicExercisePlanningClient:
                     message_type = data.get("type", "unknown")
                     content = data.get("content", message)
                     timestamp = data.get("timestamp", datetime.now().isoformat())
+                    context = data.get("context", {})
 
                     self.received_messages.append(data)
 
@@ -94,10 +95,28 @@ class DynamicExercisePlanningClient:
                     # Check if this is a final plan
                     if message_type == "final_plan":
                         self.final_plan_count += 1
-                        current_requirement = self.requirements_history[-1] if self.requirements_history else "Unknown"
-                        print(f"🎉 Final plan #{self.final_plan_count} received!")
-                        print(f"📋 This plan addresses requirement #{self.requirements_sent}:")
-                        print(f"   '{current_requirement}'")
+                        
+                        # Use server-provided context for accurate requirement tracking
+                        if context:
+                            requirement_number = context.get("requirement_number", "?")
+                            requirement_text = context.get("requirement_text", "Unknown")
+                            is_update = context.get("is_update", False)
+                            previous_request = context.get("previous_request")
+                            
+                            print(f"🎉 Final plan #{self.final_plan_count} received!")
+                            print(f"📋 This plan addresses requirement #{requirement_number}:")
+                            print(f"   '{requirement_text}'")
+                            if is_update and previous_request:
+                                print(f"   (Updated from: '{previous_request}')")
+                            elif is_update:
+                                print(f"   (This is an update from the original request)")
+                        else:
+                            # Fallback to old method if no context provided
+                            current_requirement = self.requirements_history[-1] if self.requirements_history else "Unknown"
+                            print(f"🎉 Final plan #{self.final_plan_count} received!")
+                            print(f"📋 This plan addresses requirement #{self.requirements_sent}:")
+                            print(f"   '{current_requirement}' (fallback - no server context)")
+                        
                         print("=" * 80)
                         # Don't break immediately - wait for potential additional updates
                         continue
@@ -235,6 +254,19 @@ class DynamicExercisePlanningClient:
             print(f"  Total final plans received: {self.final_plan_count}")
             if self.final_plan_count < self.requirements_sent:
                 print(f"  ⚠️  Missing {self.requirements_sent - self.final_plan_count} final plan(s) - may still be processing")
+            
+            # Show which requirements got final plans
+            final_plan_messages = [msg for msg in self.received_messages if msg.get('type') == 'final_plan']
+            if final_plan_messages:
+                print(f"\n📋 Final Plans Received:")
+                for i, plan_msg in enumerate(final_plan_messages, 1):
+                    context = plan_msg.get('context', {})
+                    if context:
+                        req_num = context.get('requirement_number', '?')
+                        req_text = context.get('requirement_text', 'Unknown')[:50] + "..."
+                        print(f"  Plan #{i}: Addresses requirement #{req_num} - '{req_text}'")
+                    else:
+                        print(f"  Plan #{i}: No context available")
 
         await self.close_websocket()
 

@@ -29,6 +29,7 @@ export OPENAI_API_KEY="your_api_key_here"
 ### Testing
 - No formal test framework is configured
 - Use `python client.py` for interactive testing with multiple scenarios
+- Use `python test_fix.py` to test requirement context tracking fixes
 - Health check endpoint: `GET http://localhost:8000/health`
 
 ## Architecture
@@ -91,6 +92,20 @@ The system uses GPT-4 to analyze requirement updates and determines:
 
 ## Development Notes
 
+### Requirement Context Tracking
+The system now includes sophisticated requirement tracking to solve timing issues:
+
+**Backend Implementation:**
+- `WebSocketManager.send_message_with_context()` sends requirement metadata
+- `summarization_node` calculates correct requirement numbers and previous requests
+- Finds actual requirement position instead of assuming chronological order
+
+**Client Implementation:**
+- Parses requirement context from WebSocket messages
+- Shows accurate requirement-to-plan correlation
+- Enhanced session summaries with plan mapping
+- Fallback to old method for backward compatibility
+
 ### Adding New Agents
 ```python
 async def new_agent_node(state: AgentState) -> AgentState:
@@ -115,8 +130,25 @@ The `AgentState` TypedDict includes:
 - `status_update`: General workflow progress
 - `planning_start`: Beginning of planning phase
 - `search_update`: Search progress updates
-- `final_plan`: Completed exercise plan
+- `final_plan`: Completed exercise plan with requirement context
 - `error`: Error messages
+
+### Message Context System
+All `final_plan` messages include requirement context for accurate tracking:
+```json
+{
+  "type": "final_plan",
+  "content": "Here is your plan...",
+  "context": {
+    "requirement_number": 3,
+    "requirement_text": "Dumbbells only, no gym",
+    "previous_request": "Change to 2x weekly only",
+    "original_request": "6-week plan to get wider, 3x weekly",
+    "is_update": true,
+    "total_requirements": 4
+  }
+}
+```
 
 ## API Endpoints
 
@@ -131,11 +163,29 @@ The `AgentState` TypedDict includes:
 - `OPENAI_API_KEY`: Required for GPT-4 access
 - Optional: `TAVILY_API_KEY` for notebook example
 
+## Recent Improvements
+
+### Phase 1: Requirement Context Tracking (Implemented)
+**Problem Solved:** Client incorrectly correlated final plans with requirements due to async processing timing issues.
+
+**Solution:** Server-side requirement context tracking
+- Backend sends requirement metadata with each final plan
+- Accurate requirement numbering and previous request tracking
+- Client displays correct plan-to-requirement correlation
+- Enhanced debugging and session summaries
+
+### Known Issues Fixed
+- ✅ **Timing Issue**: Final plans now show correct requirement numbers
+- ✅ **"Updated from" Bug**: Shows actual previous requirement, not always original
+- ✅ **WebSocket Serialization**: Removed non-serializable WebSocketManager from state
+- ✅ **Concurrent Updates**: Eliminated LangGraph concurrent state update errors
+
 ## Production Considerations
 
 The current implementation is a prototype. For production:
-- Use Redis for session management
+- Use Redis for session management and requirement context persistence
 - Add authentication and rate limiting
 - Implement proper logging and monitoring
-- Use PostgreSQL for persistent storage
+- Use PostgreSQL for long-term storage of sessions and requirement history
 - Add request debouncing for rapid updates
+- Consider Phase 2: Enhanced bidirectional state tracking for complex scenarios

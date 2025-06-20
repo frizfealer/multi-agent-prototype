@@ -10,3 +10,4 @@ langchain-core
 duckduckgo-search
 pydantic
 python-dotenv
+langsmith
