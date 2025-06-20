@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+websockets
+aiohttp
+langgraph
+langchain
+langchain-openai
+langchain-community
+langchain-core
+duckduckgo-search
+pydantic
+python-dotenv
