@@ -11,3 +11,4 @@ duckduckgo-search
 pydantic
 python-dotenv
 langsmith
+google-genai
