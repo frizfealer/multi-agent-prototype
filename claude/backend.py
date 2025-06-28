@@ -14,6 +14,9 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from pydantic import BaseModel
+from interaction_agent import TriageAgent
+from query_service import QueryService
+from session_manager import session_manager
 
 
 # Pydantic models for API
@@ -108,6 +111,9 @@ search_tool = DuckDuckGoSearchRun()
 
 # Store active workflows for updates
 active_workflows: Dict[str, dict] = {}
+
+# Store pending confirmations for triage
+pending_confirmations: Dict[str, dict] = {}
 
 
 # Agent implementations
@@ -230,11 +236,212 @@ class SummarizerAgent:
             return f"Failed to create plan: {str(e)}"
 
 
+class TriageService:
+    """Service layer that orchestrates triage flow without handling infrastructure concerns directly"""
+    
+    def __init__(self, triage_agent: TriageAgent, websocket_manager: WebSocketManager, query_service: QueryService):
+        self.triage_agent = triage_agent
+        self.websocket_manager = websocket_manager
+        self.query_service = query_service
+    
+    async def process_message(self, session_id: str, message: str, is_update: bool) -> dict:
+        """
+        Single entry point that routes message to appropriate handler
+        
+        Returns dict with action and response data for chat_endpoint
+        """
+        if session_id in pending_confirmations:
+            return await self._handle_confirmation_response(session_id, message)
+        elif session_id in active_workflows and is_update:
+            return await self._handle_workflow_update(session_id, message)
+        else:
+            return await self._handle_new_message(session_id, message)
+    
+    async def _handle_confirmation_response(self, session_id: str, message: str) -> dict:
+        """Handle yes/no responses to pending confirmations"""
+        confirmation_result = self.triage_agent.is_confirmation_response(message)
+        
+        if confirmation_result == "yes":
+            # User confirmed - get original message and cleanup
+            original_message = pending_confirmations[session_id]["original_message"]
+            del pending_confirmations[session_id]
+            
+            await self.websocket_manager.send_message(
+                session_id,
+                "Great! I'll start creating your exercise plan now.",
+                "triage_confirmed"
+            )
+            
+            return {
+                "action": "start_workflow",
+                "original_message": original_message,
+                "message": "I'm working on your exercise plan. You'll receive updates via WebSocket.",
+                "session_id": session_id,
+                "status": "processing"
+            }
+            
+        elif confirmation_result == "no":
+            # User declined
+            del pending_confirmations[session_id]
+            
+            await self.websocket_manager.send_message(
+                session_id,
+                "No problem! Let me know if you'd like help with anything else.",
+                "triage_cancelled"
+            )
+            
+            return {
+                "action": "cancelled",
+                "message": "Request cancelled. How else can I help you?",
+                "session_id": session_id,
+                "status": "cancelled"
+            }
+            
+        else:
+            # Unclear response - ask for clarification
+            await self.websocket_manager.send_message(
+                session_id,
+                "Please respond with 'yes' to proceed or 'no' to cancel.",
+                "triage_clarification"
+            )
+            
+            return {
+                "action": "awaiting_clarification",
+                "message": "Please respond with 'yes' to proceed or 'no' to cancel.",
+                "session_id": session_id,
+                "status": "awaiting_confirmation"
+            }
+    
+    async def _handle_new_message(self, session_id: str, message: str) -> dict:
+        """Handle new messages through triage classification"""
+        triage_result = await self.triage_agent.classify_and_route(message)
+        
+        if triage_result["action"] == "confirm":
+            # High-confidence create request - send confirmation
+            await self.websocket_manager.send_message(
+                session_id,
+                triage_result["confirmation_message"],
+                "triage_confirmation"
+            )
+            
+            # Store pending confirmation
+            pending_confirmations[session_id] = {
+                "original_message": message,
+                "triage_result": triage_result,
+                "timestamp": datetime.now()
+            }
+            
+            return {
+                "action": "awaiting_confirmation",
+                "message": triage_result["confirmation_message"],
+                "session_id": session_id,
+                "status": "awaiting_confirmation"
+            }
+            
+        elif triage_result["action"] == "reject":
+            # Non-exercise planning - send redirect
+            await self.websocket_manager.send_message(
+                session_id,
+                triage_result["redirect_message"],
+                "triage_redirect"
+            )
+            
+            return {
+                "action": "redirected",
+                "message": triage_result["redirect_message"],
+                "session_id": session_id,
+                "status": "redirected"
+            }
+            
+        else:
+            # Direct processing (action == "direct_process")
+            if triage_result["intent_type"] == "Query":
+                return await self._handle_query(session_id, message, triage_result)
+            else:
+                return {
+                    "action": "start_workflow",
+                    "original_message": message,
+                    "message": "I'm working on your exercise plan. You'll receive updates via WebSocket.",
+                    "session_id": session_id,
+                    "status": "processing"
+                }
+    
+    async def _handle_query(self, session_id: str, message: str, triage_result: dict) -> dict:
+        """Handle direct query answering with workout context"""
+        try:
+            query_result = await self.query_service.answer_query(session_id, message, triage_result)
+            
+            # Send answer via WebSocket
+            await self.websocket_manager.send_message(
+                session_id,
+                query_result["answer"],
+                "query_answer"
+            )
+            
+            return {
+                "action": "query_answered",
+                "session_id": session_id,
+                "status": "completed",
+                "message": query_result["answer"],
+                "query_type": query_result.get("query_type", "general"),
+                "confidence": query_result.get("confidence", 0.0)
+            }
+            
+        except Exception as e:
+            print(f"Error handling query for session {session_id}: {e}")
+            error_message = "I'm sorry, I encountered an error while answering your question. Could you please try asking again?"
+            
+            await self.websocket_manager.send_message(
+                session_id,
+                error_message,
+                "query_error"
+            )
+            
+            return {
+                "action": "query_error",
+                "session_id": session_id,
+                "status": "error",
+                "message": error_message
+            }
+    
+    async def _handle_workflow_update(self, session_id: str, message: str) -> dict:
+        """Handle updates to existing workflows"""
+        workflow_data = active_workflows[session_id]
+        current_state = workflow_data.get("last_state", {})
+
+        # Update the state with new requirements
+        current_state["user_request"] = message
+        current_state["requirements_history"] = current_state.get("requirements_history", [])
+        current_state["requirements_history"].append(message)
+
+        # Add new user message
+        if "messages" not in current_state:
+            current_state["messages"] = []
+        current_state["messages"].append(HumanMessage(content=message))
+
+        # Start async processing for the update
+        config = {"configurable": {"thread_id": session_id}}
+        task = asyncio.create_task(process_update_async(session_id, current_state, config))
+
+        workflow_data["task"] = task
+        workflow_data["last_state"] = current_state
+
+        return {
+            "action": "workflow_updated",
+            "message": "I've received your updated requirements. Let me analyze what needs to be changed...",
+            "session_id": session_id,
+            "status": "updated"
+        }
+
+
 # Initialize agents
 requirement_analyzer = RequirementAnalyzer()
 exercise_search_agent = WebSearchAgent("Exercise Search Agent")
 schedule_search_agent = WebSearchAgent("Schedule Search Agent")
 summarizer_agent = SummarizerAgent()
+triage_agent = TriageAgent()
+query_service = QueryService(active_workflows=active_workflows)
+triage_service = TriageService(triage_agent, websocket_manager, query_service)
 
 
 # Graph node functions
@@ -470,7 +677,7 @@ app.add_middleware(
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest):
-    """Handle chat requests and start async processing"""
+    """Handle chat requests with triage and start async processing"""
 
     session_id = request.session_id
     user_message = request.message
@@ -478,62 +685,43 @@ async def chat_endpoint(request: ChatRequest):
 
     print(f"Received {'update' if is_update else 'new'} request for session {session_id}: {user_message}")
 
-    # Get or create workflow state
+    # Ensure session exists in session_manager
+    session_manager.create_session(session_id)
+
+    # Process message through triage service
+    result = await triage_service.process_message(session_id, user_message, is_update)
+    
+    # Handle workflow actions
+    if result["action"] == "start_workflow":
+        await start_workflow(session_id, result["original_message"])
+    
+    # Return response (TriageService already handled WebSocket communication)
+    return ChatResponse(
+        message=result["message"],
+        session_id=result["session_id"],
+        status=result["status"]
+    )
+
+
+async def start_workflow(session_id: str, user_message: str):
+    """Start the exercise planning workflow"""
     config = {"configurable": {"thread_id": session_id}}
+    
+    initial_state = {
+        "messages": [HumanMessage(content=user_message)],
+        "session_id": session_id,
+        "user_request": user_message,
+        "original_request": user_message,
+        "requirements_history": [user_message],
+        "exercise_results": None,
+        "final_plan": None,
+        "workflow_status": WorkflowStatus.INITIAL.value,
+        "needs_rerun": True,
+    }
 
-    if session_id in active_workflows:
-        # This is an update to existing workflow
-        workflow_data = active_workflows[session_id]
-
-        # Get current state
-        current_state = workflow_data.get("last_state", {})
-
-        # Update the state with new requirements
-        current_state["user_request"] = user_message
-        current_state["requirements_history"] = current_state.get("requirements_history", [])
-        current_state["requirements_history"].append(user_message)
-
-        # Add new user message
-        if "messages" not in current_state:
-            current_state["messages"] = []
-        current_state["messages"].append(HumanMessage(content=user_message))
-
-        # Start async processing for the update
-        task = asyncio.create_task(process_update_async(session_id, current_state, config))
-
-        workflow_data["task"] = task
-        workflow_data["last_state"] = current_state
-
-        return ChatResponse(
-            message="I've received your updated requirements. Let me analyze what needs to be changed...",
-            session_id=session_id,
-            status="updated",
-        )
-
-    else:
-        # This is a new workflow
-        initial_state = {
-            "messages": [HumanMessage(content=user_message)],
-            "session_id": session_id,
-            "user_request": user_message,
-            "original_request": user_message,
-            "requirements_history": [user_message],
-            "exercise_results": None,
-            "final_plan": None,
-            "workflow_status": WorkflowStatus.INITIAL.value,
-            "needs_rerun": True,
-        }
-
-        # Start async processing
-        task = asyncio.create_task(process_request_async(session_id, initial_state, config))
-
-        active_workflows[session_id] = {"task": task, "last_state": initial_state, "created_at": datetime.now()}
-
-        return ChatResponse(
-            message="I'm working on your exercise plan. You'll receive updates via WebSocket.",
-            session_id=session_id,
-            status="processing",
-        )
+    # Start async processing
+    task = asyncio.create_task(process_request_async(session_id, initial_state, config))
+    active_workflows[session_id] = {"task": task, "last_state": initial_state, "created_at": datetime.now()}
 
 
 async def process_request_async(session_id: str, initial_state: AgentState, config: dict):

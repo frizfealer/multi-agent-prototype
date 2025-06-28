@@ -165,18 +165,6 @@ class MessageTagger:
                 Tag(intent_domain="other", intent_type="Query", confidence_score=0.0, tagged_sentences=fallback_text)
             ]
 
-    def classify_latest_message_sync(self, conversations: List[types.Content]) -> List[Tag]:
-        """
-        Synchronous wrapper for classify_latest_message method
-
-        Args:
-            conversations: List of conversation contents with full context
-
-        Returns:
-            List of Tag objects containing classified intent information for the latest message
-        """
-        return asyncio.run(self.classify_latest_message(conversations))
-
 
 # Testing and example usage
 async def test_MessageTagger():
@@ -222,58 +210,6 @@ async def test_MessageTagger():
             print(f"Result: {[tag.model_dump() for tag in result]}")
         except Exception as e:
             print(f"Error: {e}")
-
-
-# Example of how to integrate with existing system
-def integrate_with_interaction_agent(tagger: MessageTagger, conversations: List[types.Content]) -> dict:
-    """
-    Example of how to integrate sentence tagger with existing interaction agent
-
-    Args:
-        tagger: SentenceTagger instance
-        conversations: List of conversation contents
-
-    Returns:
-        Dictionary with routing information
-    """
-    tags = tagger.classify_latest_message_sync(conversations)
-
-    # Find the highest confidence exercise planning tag
-    exercise_tags = [tag for tag in tags if tag.intent_domain == "exercise_planning"]
-
-    if exercise_tags:
-        # Sort by confidence and get the highest
-        best_tag = max(exercise_tags, key=lambda x: x.confidence_score)
-
-        # Determine routing based on intent type
-        if best_tag.intent_type in ["Create Request", "Update Request", "Delete Request"]:
-            return {
-                "route": "workflow",
-                "intent_domain": best_tag.intent_domain,
-                "intent_type": best_tag.intent_type,
-                "confidence": best_tag.confidence_score,
-                "tagged_text": best_tag.tagged_sentences,
-                "update_request": best_tag.tagged_sentences,
-            }
-        else:  # Query
-            return {
-                "route": "direct_response",
-                "intent_domain": best_tag.intent_domain,
-                "intent_type": best_tag.intent_type,
-                "confidence": best_tag.confidence_score,
-                "tagged_text": best_tag.tagged_sentences,
-                "query": best_tag.tagged_sentences,
-            }
-    else:
-        # No exercise planning intents found
-        highest_confidence_tag = max(tags, key=lambda x: x.confidence_score)
-        return {
-            "route": "not_supported",
-            "intent_domain": highest_confidence_tag.intent_domain,
-            "intent_type": highest_confidence_tag.intent_type,
-            "confidence": highest_confidence_tag.confidence_score,
-            "message": f"Sorry we are not supporting this {highest_confidence_tag.intent_domain}",
-        }
 
 
 if __name__ == "__main__":
