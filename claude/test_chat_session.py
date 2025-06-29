@@ -41,7 +41,7 @@ def test_create_session():
 
     session = ChatSession("session_123")
     assert session.session_id == "session_123"
-    assert session.active_workflows == {}
+    assert session.workflows == {}
     assert session.pending_approvals == {}
     assert session.message_history == []
     assert isinstance(session.created_at, datetime)
@@ -53,8 +53,8 @@ def test_add_workflow_to_domain(sample_session, sample_workflow):
     result = sample_session.add_workflow("finance", sample_workflow)
 
     assert result
-    assert "finance" in sample_session.active_workflows
-    assert sample_session.active_workflows["finance"] == sample_workflow
+    assert "finance" in sample_session.workflows
+    assert sample_session.workflows["finance"] == sample_workflow
     assert sample_session.get_workflow("finance") == sample_workflow
 
 
@@ -72,9 +72,9 @@ def test_replace_workflow_in_same_domain(sample_session, capsys):
     assert not result2
 
     # The original workflow should still be there
-    assert sample_session.active_workflows["finance"] == workflow1
+    assert sample_session.workflows["finance"] == workflow1
     assert sample_session.get_workflow("finance") == workflow1
-    assert len(sample_session.active_workflows) == 1
+    assert len(sample_session.workflows) == 1
 
     # Check that a warning was printed
     captured = capsys.readouterr()
@@ -98,7 +98,7 @@ def test_multiple_concurrent_domains(sample_session):
     sample_session.add_workflow("finance", finance_wf)
     sample_session.add_workflow("travel", travel_wf)
 
-    assert len(sample_session.active_workflows) == 2
+    assert len(sample_session.workflows) == 2
     assert sample_session.get_workflow("finance") == finance_wf
     assert sample_session.get_workflow("travel") == travel_wf
 
@@ -111,7 +111,7 @@ def test_remove_workflow(sample_session, sample_workflow):
     removed = sample_session.remove_workflow("finance")
     assert removed
     assert sample_session.get_workflow("finance") is None
-    assert "finance" not in sample_session.active_workflows
+    assert "finance" not in sample_session.workflows
 
 
 def test_remove_nonexistent_workflow(sample_session):
@@ -313,7 +313,7 @@ def test_session_to_dict(sample_session):
     assert isinstance(session_dict["created_at"], str)  # ISO format
     assert isinstance(session_dict["last_activity"], str)  # ISO format
     assert session_dict["message_count"] == 1
-    assert session_dict["active_domains"] == ["finance"]
+    assert session_dict["workflow_domains"] == ["finance"]
     assert session_dict["pending_approval_domains"] == ["travel"]
     assert session_dict["total_domains"] == 2
 

@@ -3,6 +3,7 @@ Refactored Session Management for Domain-Based Concurrent Workflows
 
 This module provides simplified session management that supports:
 - Domain-keyed concurrent workflows
+- Conversation history with sliding window
 - Minimal session state (just connection management)
 - Clean separation of concerns
 """
@@ -14,6 +15,7 @@ from typing import Dict, Optional, Any, List, Set
 from functools import wraps
 
 from claude.domain_models import RunningWorkflow, PendingApproval
+from claude.message_types import Message, ConversationManager
 
 
 def updates_activity(method):
@@ -37,33 +39,35 @@ class ChatSession:
     last_activity: datetime = field(default_factory=datetime.now)
     
     # Domain-keyed workflows and approvals - one per domain
-    active_workflows: Dict[str, RunningWorkflow] = field(default_factory=dict)
+    workflows: Dict[str, RunningWorkflow] = field(default_factory=dict)
     pending_approvals: Dict[str, PendingApproval] = field(default_factory=dict)
     
-    # Message history for context only
-    message_history: List[str] = field(default_factory=list)
+    # Conversation history with structured messages
+    message_history: List[Message] = field(default_factory=list)
+    
+    # Conversation manager for sliding window and format conversion
+    conversation_manager: ConversationManager = field(default_factory=lambda: ConversationManager(max_messages=50))
     
     @updates_activity
     def add_workflow(self, domain: str, workflow: RunningWorkflow) -> bool:
         """Add workflow to domain - returns False if one already exists"""
-        if domain in self.active_workflows:
-            existing = self.active_workflows[domain]
+        if domain in self.workflows:
+            existing = self.workflows[domain]
             print(f"Warning: Cannot add workflow for domain '{domain}'. "
                   f"A workflow (ID: {existing.id}) is already active.")
             return False
-        self.active_workflows[domain] = workflow
+        self.workflows[domain] = workflow
         return True
     
     @updates_activity
     def get_workflow(self, domain: str) -> Optional[RunningWorkflow]:
         """Get workflow for domain"""
-        return self.active_workflows.get(domain)
+        return self.workflows.get(domain)
     
-    @updates_activity
     def remove_workflow(self, domain: str) -> bool:
-        """Remove workflow from domain"""
-        if domain in self.active_workflows:
-            del self.active_workflows[domain]
+        """Remove workflow from domain completely"""
+        if domain in self.workflows:
+            del self.workflows[domain]
             return True
         return False
     
@@ -98,8 +102,8 @@ class ChatSession:
         return approval
     
     def get_all_domains(self) -> Set[str]:
-        """Get all domains with active workflows or pending approvals"""
-        domains = set(self.active_workflows.keys())
+        """Get all domains with workflows or pending approvals"""
+        domains = set(self.workflows.keys())
         domains.update(self.pending_approvals.keys())
         return domains
     
@@ -108,9 +112,54 @@ class ChatSession:
         self.last_activity = datetime.now()
     
     @updates_activity
-    def add_message(self, message: str):
-        """Add message to history and update activity"""
+    def add_message(self, message: Message):
+        """Add structured message to history and update activity"""
         self.message_history.append(message)
+        # Apply sliding window to keep memory usage under control
+        self.message_history = self.conversation_manager.apply_sliding_window(self.message_history)
+    
+    @updates_activity
+    def add_user_message(self, content: str):
+        """Add user message to history"""
+        message = Message.from_user(content)
+        self.add_message(message)
+    
+    @updates_activity
+    def add_ai_message(self, content: str, source: str = "ai"):
+        """Add AI/model message to history"""
+        message = Message.from_ai(content, source)
+        self.add_message(message)
+    
+    @updates_activity
+    def add_system_message(self, content: str, source: str = "system"):
+        """Add system message to history"""
+        message = Message.from_system(content, source)
+        self.add_message(message)
+    
+    def get_conversation_history(self, include_system: bool = True) -> List[Message]:
+        """Get conversation history, optionally excluding system messages"""
+        if include_system:
+            return self.message_history.copy()
+        return [msg for msg in self.message_history if msg.role != "system"]
+    
+    def get_conversation_for_gemini(self, include_system: bool = True) -> List:
+        """Get conversation in Gemini format"""
+        messages = self.get_conversation_history(include_system)
+        return self.conversation_manager.to_gemini_format(messages)
+    
+    def get_conversation_for_langchain(self, include_system: bool = True) -> List:
+        """Get conversation in LangChain format"""
+        messages = self.get_conversation_history(include_system)
+        return self.conversation_manager.to_langchain_format(messages)
+    
+    def get_latest_user_message(self) -> Optional[Message]:
+        """Get the most recent user message"""
+        return self.conversation_manager.get_latest_user_message(self.message_history)
+    
+    def get_conversation_context(self, include_system: bool = True) -> str:
+        """Get conversation as formatted string for context"""
+        messages = self.get_conversation_history(include_system)
+        return self.conversation_manager.get_conversation_context(messages, include_system)
     
     def is_expired(self, timeout_minutes: int = 30) -> bool:
         """Check if session has expired due to inactivity"""
@@ -135,7 +184,7 @@ class ChatSession:
             "created_at": self.created_at.isoformat(),
             "last_activity": self.last_activity.isoformat(),
             "message_count": len(self.message_history),
-            "active_domains": list(self.active_workflows.keys()),
+            "workflow_domains": list(self.workflows.keys()),
             "pending_approval_domains": list(self.pending_approvals.keys()),
             "total_domains": len(self.get_all_domains())
         }
@@ -196,7 +245,7 @@ class SessionManager:
             session = self.sessions[session_id]
             
             # Cancel workflow tasks if running
-            for workflow in session.active_workflows.values():
+            for workflow in session.workflows.values():
                 if workflow.task and not workflow.task.done():
                     workflow.task.cancel()
             
@@ -230,7 +279,7 @@ class SessionManager:
     def get_session_stats(self) -> Dict[str, Any]:
         """Get overall session statistics"""
         total_sessions = len(self.sessions)
-        total_workflows = sum(len(s.active_workflows) for s in self.sessions.values())
+        total_workflows = sum(len(s.workflows) for s in self.sessions.values())
         total_pending_approvals = sum(len(s.pending_approvals) for s in self.sessions.values())
         
         # Domain statistics
@@ -258,7 +307,7 @@ class SessionManager:
         # Add workflow details
         details["workflows"] = {
             domain: workflow.to_dict() 
-            for domain, workflow in session.active_workflows.items()
+            for domain, workflow in session.workflows.items()
         }
         
         # Add approval details
@@ -276,7 +325,7 @@ class SessionManager:
         
         # Cancel all workflow tasks
         for session in self.sessions.values():
-            for workflow in session.active_workflows.values():
+            for workflow in session.workflows.values():
                 if workflow.task and not workflow.task.done():
                     workflow.task.cancel()
         
