@@ -6,10 +6,13 @@ and then return routing decisions without handling session management.
 """
 
 import asyncio
-from typing import Dict, Any
+from typing import Dict, Any, Optional, TYPE_CHECKING
 
 from message_tagger import MessageTagger
 from google.genai import types
+
+if TYPE_CHECKING:
+    from claude.session_manager import ChatSession
 
 
 class TriageAgent:
@@ -22,12 +25,13 @@ class TriageAgent:
         self.message_tagger = MessageTagger()
         self.high_confidence_threshold = high_confidence_threshold
     
-    async def classify_and_route(self, user_message: str) -> Dict[str, Any]:
+    async def classify_and_route(self, session_id: str, session: "ChatSession") -> Dict[str, Any]:
         """
-        Classify user message and return routing decision
+        Classify conversation and return routing decision based on full conversation history
         
         Args:
-            user_message: The user's input message
+            session_id: Session identifier
+            session: Chat session containing conversation history
             
         Returns:
             Dictionary with routing decision:
@@ -42,13 +46,15 @@ class TriageAgent:
                 "redirect_message": str (optional)
             }
         """
-        # Convert message to conversation format for MessageTagger
-        conversations = [
-            types.Content(
-                role="user",
-                parts=[types.Part.from_text(text=user_message)]
-            )
-        ]
+        # Get conversation history in Gemini format (excluding system messages)
+        conversations = session.get_conversation_for_gemini(include_system=False)
+        
+        # Get the latest user message for response generation
+        latest_user_msg = session.get_latest_user_message()
+        if not latest_user_msg:
+            return self._create_error_response("", "No user message found in conversation")
+        
+        user_message = latest_user_msg.content
         
         try:
             # Classify the message
