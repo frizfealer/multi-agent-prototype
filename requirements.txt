@@ -1,0 +1,36 @@
+# Core dependencies
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+python-jose[cryptography]
+
+# Database
+sqlalchemy
+asyncpg
+alembic
+
+# LLM Integration
+langchain
+langchain-community
+langchain-google-genai
+google-generativeai
+openai
+
+# Utilities
+python-dotenv
+httpx
+structlog
+python-multipart
+
+# Testing
+pytest
+pytest-asyncio
+pytest-cov
+faker
+
+# Development
+black
+ruff
+mypy
+pre-commit
