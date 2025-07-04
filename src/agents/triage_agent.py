@@ -149,4 +149,10 @@ class TriageAgent:
 
         except Exception as e:
             print(f"Error processing request: {e}")
-            return None
+            # Return a helpful error message instead of None
+            return {
+                "name": "respond_directly",
+                "arguments": json.dumps({
+                    "text": "I apologize, but I encountered an error while processing your request. Could you please try rephrasing or let me know if the issue persists?"
+                })
+            }
