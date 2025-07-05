@@ -36,7 +36,7 @@ def handle_command(command, conversation_id):
             print("❌ No active conversation. Start chatting first!")
             return True
 
-        response = requests.get(f"http://127.0.0.1:8000/conversations/{conversation_id}/tasks")
+        response = requests.get(f"http://127.0.0.1:8001/conversations/{conversation_id}/tasks")
         if response.status_code == 200:
             tasks = response.json().get("pending_tasks", [])
             print_tasks(tasks)

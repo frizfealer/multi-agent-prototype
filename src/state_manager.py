@@ -125,7 +125,7 @@ def get_pending_tasks_by_conversation(conversation_id):
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute(
-        "SELECT task_id, goal, domain, task_status, context, result, created_at, updated_at FROM Task WHERE conversation_id = %s AND task_status = 'pending' ORDER BY created_at ASC",
+        "SELECT task_id, goal, domain, task_status, context, result, created_at, updated_at FROM Tasks WHERE conversation_id = %s AND task_status = 'pending' ORDER BY created_at ASC",
         (str(conversation_id),),
     )
     tasks = cur.fetchall()
@@ -259,3 +259,69 @@ def get_tasks_by_conversation(conversation_id):
         }
         for task in tasks
     ]
+
+
+def execute_atomic_updates(conversation_id, operations):
+    """
+    Execute multiple operations in a single transaction.
+
+    Args:
+        conversation_id: The conversation ID
+        operations: List of operations, each with:
+            - type: 'add_message', 'update_agent', 'create_task'
+            - Additional fields based on type
+
+    Returns:
+        True if successful, raises exception on failure
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    try:
+        # All operations in one transaction
+        for op in operations:
+            if op["type"] == "add_message":
+                message_id = str(uuid.uuid4())
+                cur.execute(
+                    "INSERT INTO Messages (message_id, conversation_id, role, agent, content, task_id) VALUES (%s, %s, %s, %s, %s, %s)",
+                    (
+                        message_id,
+                        str(conversation_id),
+                        op["role"],
+                        op.get("agent"),
+                        op["content"],
+                        str(op.get("task_id")) if op.get("task_id") else None,
+                    ),
+                )
+
+            elif op["type"] == "update_agent":
+                cur.execute(
+                    "UPDATE Conversations SET current_agent = %s, updated_at = CURRENT_TIMESTAMP WHERE conversation_id = %s",
+                    (op["agent"], str(conversation_id)),
+                )
+
+            elif op["type"] == "create_task":
+                task = op["task"]
+                task_id = task.get("task_id", str(uuid.uuid4()))
+                cur.execute(
+                    "INSERT INTO Tasks (task_id, conversation_id, goal, domain, task_status, context) VALUES (%s, %s, %s, %s, %s, %s)",
+                    (
+                        task_id,
+                        str(conversation_id),
+                        task["goal"],
+                        task["domain"],
+                        task.get("status", "pending"),
+                        json.dumps(task.get("context", {})),
+                    ),
+                )
+
+        conn.commit()
+        return True
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    finally:
+        cur.close()
+        conn.close()

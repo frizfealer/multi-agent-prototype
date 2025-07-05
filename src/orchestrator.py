@@ -7,11 +7,9 @@ from src.agents.nutrition_coach import NutritionCoach
 from src.agents.triage_agent import TriageAgent
 from src.logging_config import get_logger
 from src.state_manager import (
-    add_message,
     create_conversation,
-    create_task,
+    execute_atomic_updates,
     get_conversation_state,
-    update_conversation_state,
 )
 
 logger = get_logger(__name__)
@@ -31,13 +29,10 @@ class Orchestrator:
 
     async def handle_message(self, conversation_id, user_message):
         """
-        Handles a new message from the user.
+        Handles a new message from the user with atomic state updates.
         """
         logger.info(f"Handling message for conversation {conversation_id}")
         logger.debug(f"User message: {user_message[:100]}...")  # Log first 100 chars
-
-        # Add user message to history
-        add_message(conversation_id, "user", user_message)
 
         # Get the current conversation state
         state = get_conversation_state(conversation_id)
@@ -45,7 +40,7 @@ class Orchestrator:
             logger.error(f"Conversation {conversation_id} not found")
             return {"error": "Conversation not found."}
 
-        # Get the current agent (create dynamically if needed)
+        # Get the current agent
         current_agent_name = state["current_agent"]
         logger.info(f"Current agent: {current_agent_name}")
 
@@ -54,94 +49,112 @@ class Orchestrator:
             logger.error(f"Agent '{current_agent_name}' not found")
             return {"error": f"Agent '{current_agent_name}' not found."}
 
-        # Let the agent process the request
+        # Let the agent process the request with user message appended
+        working_history = state["history"] + [{"role": "user", "content": user_message}]
         logger.debug(f"Processing request with {current_agent_name}")
-        action = await agent.process_request(state["history"])
+        action = await agent.process_request(working_history)
 
-        # Execute the action
-        logger.info(f"Executing action: {action}")
-        return await self.execute_action(conversation_id, action, current_agent_name)
-
-    async def execute_action(self, conversation_id, action, current_agent_name):
-        """
-        Executes the action returned by the agent.
-        """
+        # Process action and build atomic operations
         action_name = action.get("name")
         action_args = json.loads(action.get("arguments", "{}"))
-        logger.debug(f"Executing {action_name} with args: {action_args}")
+        logger.info(f"Executing action: {action_name}")
 
-        if action_name == "hand_off_to_experts":
-            experts = action_args["experts"]
-            if experts:
-                # Create composite agent name
-                agent_name = "+".join(sorted(experts))
-                logger.info(f"Handing off to {agent_name}")
-                update_conversation_state(conversation_id, current_agent=agent_name)
+        # Start building operations - always add user message first
+        operations = [{"type": "add_message", "role": "user", "content": user_message}]
+        response_text = ""
 
-                # Create friendly response message
-                expert_names = [expert.replace("_", " ").title() for expert in experts]
-                if len(expert_names) == 1:
-                    response_message = f"Perfect, connecting you to our {expert_names[0]}..."
-                else:
-                    response_message = f"Perfect, connecting you to our {' and '.join(expert_names)} specialists..."
+        if action_name == "respond_directly":
+            # Simple response
+            text = action_args.get("text", "")
+            operations.append({"type": "add_message", "role": "model", "content": text, "agent": current_agent_name})
+            response_text = text
 
-                add_message(conversation_id, "model", response_message, agent=current_agent_name)
-
-                # Get the new agent and process an initial greeting
-                new_agent = self.get_agent_for_conversation(agent_name)
-                if new_agent:
-                    # Get updated conversation state with the handoff message
-                    updated_state = get_conversation_state(conversation_id)
-
-                    # Let the new agent process the conversation and generate a greeting
-                    logger.debug(f"New agent {agent_name} processing initial request")
-                    expert_action = await new_agent.process_request(updated_state["history"])
-
-                    if expert_action:
-                        # Execute the expert's action (should be respond_directly with greeting)
-                        expert_response = await self.execute_action(conversation_id, expert_action, agent_name)
-
-                        # Combine both messages in the response
-                        combined_response = f"{response_message}\n--------------------------------\n{expert_response.get('response', '')}"
-                        logger.info(f"Combined response: {combined_response}")
-                        return {"response": combined_response}
-
-                return {"response": response_message}
-            else:
+        elif action_name == "hand_off_to_experts":
+            # Handle expert handoff
+            experts = action_args.get("experts", [])
+            if not experts:
                 logger.error("No expert specified for handoff")
                 return {"error": "No expert specified for handoff."}
 
-        elif action_name == "hand_off_to_triage_agent":
-            # Escape hatch back to triage
-            logger.info("Handing off back to triage agent")
-            update_conversation_state(conversation_id, current_agent="triage")
-            response_message = "Let me connect you back to our main assistant..."
-            add_message(conversation_id, "model", response_message, agent=current_agent_name)
+            # Create composite agent name
+            new_agent_name = "+".join(sorted(experts))
+            logger.info(f"Handing off to {new_agent_name}")
 
-            # Get the triage agent and process the conversation
+            # Update agent
+            operations.append({"type": "update_agent", "agent": new_agent_name})
+
+            # Create handoff message
+            expert_names = [expert.replace("_", " ").title() for expert in experts]
+            if len(expert_names) == 1:
+                handoff_message = f"Perfect, connecting you to our {expert_names[0]}..."
+            else:
+                handoff_message = f"Perfect, connecting you to our {' and '.join(expert_names)} specialists..."
+
+            operations.append(
+                {"type": "add_message", "role": "model", "content": handoff_message, "agent": current_agent_name}
+            )
+
+            # Get new agent's greeting
+            new_agent = self.get_agent_for_conversation(new_agent_name)
+            if new_agent:
+                # Build history as it will be after handoff
+                new_history = working_history + [
+                    {"role": "model", "agent": current_agent_name, "content": handoff_message}
+                ]
+
+                # Get greeting from new agent
+                logger.debug(f"Getting greeting from {new_agent_name}")
+                greeting_action = await new_agent.process_request(new_history)
+
+                if greeting_action and greeting_action.get("name") == "respond_directly":
+                    greeting_text = json.loads(greeting_action.get("arguments", "{}")).get("text", "")
+                    operations.append(
+                        {"type": "add_message", "role": "model", "content": greeting_text, "agent": new_agent_name}
+                    )
+                    response_text = f"{handoff_message}\n--------------------------------\n{greeting_text}"
+                else:
+                    response_text = handoff_message
+            else:
+                response_text = handoff_message
+
+        elif action_name == "hand_off_to_triage_agent":
+            # Handle triage handoff
+            logger.info("Handing off back to triage agent")
+
+            # Update agent
+            operations.append({"type": "update_agent", "agent": "triage"})
+
+            # Add handoff message
+            handoff_message = "Let me connect you back to our main assistant..."
+            operations.append(
+                {"type": "add_message", "role": "model", "content": handoff_message, "agent": current_agent_name}
+            )
+
+            # Get triage agent's greeting
             triage_agent = self.get_agent_for_conversation("triage")
             if triage_agent:
-                # Get updated conversation state with the handoff message
-                updated_state = get_conversation_state(conversation_id)
+                # Build history as it will be after handoff
+                new_history = working_history + [
+                    {"role": "model", "agent": current_agent_name, "content": handoff_message}
+                ]
 
-                # Let the triage agent process the conversation and generate a response
-                triage_action = await triage_agent.process_request(updated_state["history"])
+                # Get greeting from triage
+                logger.debug("Getting greeting from triage agent")
+                greeting_action = await triage_agent.process_request(new_history)
 
-                if triage_action:
-                    # Execute the triage agent's action
-                    triage_response = await self.execute_action(conversation_id, triage_action, "triage")
-
-                    # Combine both messages in the response
-                    combined_response = (
-                        f"{response_message}\n--------------------------------\n{triage_response.get('response', '')}"
+                if greeting_action and greeting_action.get("name") == "respond_directly":
+                    greeting_text = json.loads(greeting_action.get("arguments", "{}")).get("text", "")
+                    operations.append(
+                        {"type": "add_message", "role": "model", "content": greeting_text, "agent": "triage"}
                     )
-                    logger.info(f"Combined response: {combined_response}")
-                    return {"response": combined_response}
-
-            return {"response": response_message}
+                    response_text = f"{handoff_message}\n--------------------------------\n{greeting_text}"
+                else:
+                    response_text = handoff_message
+            else:
+                response_text = handoff_message
 
         elif action_name == "create_artifacts":
-            # Create task for background processing
+            # Handle task creation
             domain = action_args.get("domain")
             data = action_args.get("data")
 
@@ -150,30 +163,40 @@ class Orchestrator:
                 return {"error": "Domain and data are required for create_artifacts"}
 
             task_id = str(uuid.uuid4())
-            task = {
-                "task_id": task_id,
-                "conversation_id": conversation_id,
-                "domain": domain,
-                "goal": f"create_{domain}",
-                "context": data,
-                "status": "pending",
-            }
 
-            logger.info(f"Creating task {task_id} for domain {domain}")
-            create_task(task)
-            response_message = f"Your {domain.replace('_', ' ')} task has been prepared! Use /start_tasks when you're ready to begin generation."
-            add_message(conversation_id, "model", response_message, agent=current_agent_name)
-            return {"response": response_message}
+            # Create task
+            operations.append(
+                {
+                    "type": "create_task",
+                    "task": {
+                        "task_id": task_id,
+                        "conversation_id": conversation_id,
+                        "domain": domain,
+                        "goal": f"create_{domain}",
+                        "context": data,
+                        "status": "pending",
+                    },
+                }
+            )
 
-        elif action_name == "respond_directly":
-            text = action_args.get("text")
-            logger.debug("Responding directly to user")
-            add_message(conversation_id, "model", text, agent=current_agent_name)
-            return {"response": text}
+            # Add task creation message
+            task_message = f"Your {domain.replace('_', ' ')} task has been prepared! Use /start_tasks when you're ready to begin generation."
+            operations.append(
+                {"type": "add_message", "role": "model", "content": task_message, "agent": current_agent_name}
+            )
+            response_text = task_message
 
         else:
             logger.error(f"Unknown action: {action_name}")
             return {"error": f"Unknown action: {action_name}"}
+
+        # Execute all operations atomically
+        try:
+            execute_atomic_updates(conversation_id, operations)
+            return {"response": response_text}
+        except Exception as e:
+            logger.error(f"Failed to execute atomic updates: {e}")
+            return {"error": "Failed to process message. Please try again."}
 
     def get_agent_for_conversation(self, agent_name):
         """Get agent for conversation, creating dynamically if needed."""
