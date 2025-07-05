@@ -1,12 +1,13 @@
 from typing import List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 
 from src.orchestrator import Orchestrator
 from src.state_manager import (
     create_conversation,
     get_pending_tasks_by_conversation,
+    get_tasks_by_status,
     start_tasks,
 )
 from src.logging_config import setup_logging, get_logger
@@ -54,15 +55,31 @@ async def chat(message: Message):
 
 
 @app.get("/conversations/{conversation_id}/tasks")
-async def get_tasks(conversation_id: str):
+async def get_tasks(
+    conversation_id: str,
+    status: Optional[str] = Query(None, description="Filter by task status: pending, in_progress, completed, canceled, deleted")
+):
     """
-    Get all pending tasks for a conversation.
+    Get tasks for a conversation, optionally filtered by status.
     """
     try:
-        logger.info(f"Getting tasks for conversation: {conversation_id}")
-        tasks = get_pending_tasks_by_conversation(conversation_id)
-        logger.info(f"Found {len(tasks)} pending tasks")
-        return {"conversation_id": conversation_id, "pending_tasks": tasks}
+        logger.info(f"Getting tasks for conversation: {conversation_id}, status filter: {status}")
+        
+        if status:
+            valid_statuses = ["pending", "in_progress", "completed", "canceled", "deleted"]
+            if status not in valid_statuses:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid status. Must be one of: {', '.join(valid_statuses)}"
+                )
+            tasks = get_tasks_by_status(conversation_id, status)
+        else:
+            tasks = get_tasks_by_status(conversation_id)
+        
+        logger.info(f"Found {len(tasks)} tasks")
+        return {"conversation_id": conversation_id, "tasks": tasks, "status_filter": status}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting tasks: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))

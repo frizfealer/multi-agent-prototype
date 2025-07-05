@@ -13,7 +13,7 @@ CREATE TABLE tasks(
     conversation_id UUID REFERENCES Conversations(conversation_id),
     goal VARCHAR(255),
     domain VARCHAR(255),
-    task_status VARCHAR(50) CHECK (task_status IN ('pending', 'completed', 'canceled', 'deleted')),
+    task_status VARCHAR(50) CHECK (task_status IN ('pending', 'in_progress', 'completed', 'canceled', 'deleted')),
     context TEXT,
     result TEXT,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,

@@ -3,16 +3,27 @@ import json
 import requests
 
 
-def print_tasks(tasks):
+def print_tasks(tasks, status_filter=None):
     """Print tasks in a formatted way."""
     if not tasks:
-        print("📋 No pending tasks found.")
+        status_text = f"{status_filter} " if status_filter else ""
+        print(f"📋 No {status_text}tasks found.")
         return
 
-    print(f"📋 Found {len(tasks)} pending task(s):")
+    status_text = f"{status_filter} " if status_filter else ""
+    print(f"📋 Found {len(tasks)} {status_text}task(s):")
     for i, task in enumerate(tasks, 1):
-        print(f"\n{i}. {task['domain'].replace('_', ' ').title()}")
+        status_emoji = {
+            "pending": "⏳",
+            "in_progress": "🔄",
+            "completed": "✅",
+            "canceled": "❌",
+            "deleted": "🗑️"
+        }.get(task.get('task_status', 'pending'), "❓")
+        
+        print(f"\n{i}. {status_emoji} {task['domain'].replace('_', ' ').title()}")
         print(f"   Goal: {task['goal']}")
+        print(f"   Status: {task.get('task_status', 'pending')}")
         print(f"   Task ID: {task['task_id'][:8]}...")
         if task.get("context"):
             context = task["context"]
@@ -31,15 +42,24 @@ def handle_command(command, conversation_id):
     """Handle special CLI commands."""
     command = command.lower().strip()
 
-    if command == "/tasks":
+    if command.startswith("/tasks"):
         if not conversation_id:
             print("❌ No active conversation. Start chatting first!")
             return True
 
-        response = requests.get(f"http://127.0.0.1:8001/conversations/{conversation_id}/tasks")
+        # Parse status filter
+        parts = command.split()
+        status_filter = parts[1] if len(parts) > 1 else None
+        
+        # Build URL with status parameter
+        url = f"http://127.0.0.1:8001/conversations/{conversation_id}/tasks"
+        if status_filter:
+            url += f"?status={status_filter}"
+        
+        response = requests.get(url)
         if response.status_code == 200:
-            tasks = response.json().get("pending_tasks", [])
-            print_tasks(tasks)
+            tasks = response.json().get("tasks", [])
+            print_tasks(tasks, status_filter)
         else:
             print(f"❌ Error getting tasks: {response.text}")
         return True
@@ -55,7 +75,7 @@ def handle_command(command, conversation_id):
             print(f"🚀 {result['message']}")
             if result.get("started_tasks"):
                 print("\nStarted tasks:")
-                print_tasks(result["started_tasks"])
+                print_tasks(result["started_tasks"], "started")
         else:
             print(f"❌ Error starting tasks: {response.text}")
         return True
@@ -70,17 +90,24 @@ Chat Commands:
   exit          Exit the CLI
 
 Task Commands:
-  /tasks        View pending tasks for this conversation
-  /start        Start all pending tasks
-  /help         Show this help message
+  /tasks                View all tasks
+  /tasks pending        View pending tasks
+  /tasks in_progress    View running tasks
+  /tasks completed      View completed tasks
+  /tasks canceled       View canceled tasks
+  /tasks deleted        View deleted tasks
+  /start                Start all pending tasks
+  /help                 Show this help message
 
 Example Workflow:
   You: I want a workout plan
   Agent: [Creates ExerciseCoach, gathers info]
-  You: /tasks
+  You: /tasks pending
   [Shows pending exercise_planning task]
   You: /start
-  [Starts task generation]
+  [Starts task generation, tasks move to in_progress]
+  You: /tasks in_progress
+  [Shows running tasks]
         """
         )
         return True

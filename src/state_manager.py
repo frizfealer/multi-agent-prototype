@@ -111,7 +111,7 @@ def create_task(task_dict):
     context = json.dumps(task_dict.get("context", {}))
 
     cur.execute(
-        "INSERT INTO Tasks (task_id, conversation_id, goal, domain, task_status, context) VALUES (%s, %s, %s, %s, %s, %s)",
+        "INSERT INTO tasks (task_id, conversation_id, goal, domain, task_status, context) VALUES (%s, %s, %s, %s, %s, %s)",
         (task_id, str(conversation_id), goal, domain, task_status, context),
     )
     conn.commit()
@@ -122,12 +122,31 @@ def create_task(task_dict):
 
 def get_pending_tasks_by_conversation(conversation_id):
     """Retrieves all pending tasks for a conversation."""
+    return get_tasks_by_status(conversation_id, "pending")
+
+
+def get_tasks_by_status(conversation_id, status=None):
+    """Retrieves tasks for a conversation filtered by status.
+    
+    Args:
+        conversation_id: The conversation ID
+        status: Optional status filter ('pending', 'in_progress', 'completed', 'canceled', 'deleted')
+                If None, returns all tasks
+    """
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute(
-        "SELECT task_id, goal, domain, task_status, context, result, created_at, updated_at FROM Tasks WHERE conversation_id = %s AND task_status = 'pending' ORDER BY created_at ASC",
-        (str(conversation_id),),
-    )
+    
+    if status:
+        cur.execute(
+            "SELECT task_id, goal, domain, task_status, context, result, created_at, updated_at FROM tasks WHERE conversation_id = %s AND task_status = %s ORDER BY created_at ASC",
+            (str(conversation_id), status),
+        )
+    else:
+        cur.execute(
+            "SELECT task_id, goal, domain, task_status, context, result, created_at, updated_at FROM tasks WHERE conversation_id = %s ORDER BY created_at ASC",
+            (str(conversation_id),),
+        )
+    
     tasks = cur.fetchall()
     cur.close()
     conn.close()
@@ -156,13 +175,13 @@ def start_tasks(conversation_id, task_ids=None):
         # Start specific tasks
         placeholders = ",".join(["%s"] * len(task_ids))
         cur.execute(
-            f"UPDATE Task SET task_status = 'in_progress', updated_at = CURRENT_TIMESTAMP WHERE conversation_id = %s AND task_id IN ({placeholders})",
+            f"UPDATE tasks SET task_status = 'in_progress', updated_at = CURRENT_TIMESTAMP WHERE conversation_id = %s AND task_id IN ({placeholders})",
             [str(conversation_id)] + [str(task_id) for task_id in task_ids],
         )
     else:
         # Start all pending tasks
         cur.execute(
-            "UPDATE Task SET task_status = 'in_progress', updated_at = CURRENT_TIMESTAMP WHERE conversation_id = %s AND task_status = 'pending'",
+            "UPDATE tasks SET task_status = 'in_progress', updated_at = CURRENT_TIMESTAMP WHERE conversation_id = %s AND task_status = 'pending'",
             (str(conversation_id),),
         )
 
@@ -198,7 +217,7 @@ def update_task(task_id, task_status=None, result=None, context=None):
         updates.append("updated_at = CURRENT_TIMESTAMP")
         params.append(str(task_id))
 
-        query = f"UPDATE Task SET {', '.join(updates)} WHERE task_id = %s"
+        query = f"UPDATE tasks SET {', '.join(updates)} WHERE task_id = %s"
         cur.execute(query, params)
         conn.commit()
 
@@ -211,7 +230,7 @@ def get_task(task_id):
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute(
-        "SELECT task_id, conversation_id, goal, domain, task_status, context, result, created_at, updated_at FROM Task WHERE task_id = %s",
+        "SELECT task_id, conversation_id, goal, domain, task_status, context, result, created_at, updated_at FROM tasks WHERE task_id = %s",
         (str(task_id),),
     )
     task_data = cur.fetchone()
@@ -239,7 +258,7 @@ def get_tasks_by_conversation(conversation_id):
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute(
-        "SELECT task_id, goal, domain, task_status, context, result, created_at, updated_at FROM Task WHERE conversation_id = %s ORDER BY created_at ASC",
+        "SELECT task_id, goal, domain, task_status, context, result, created_at, updated_at FROM tasks WHERE conversation_id = %s ORDER BY created_at ASC",
         (str(conversation_id),),
     )
     tasks = cur.fetchall()
@@ -304,7 +323,7 @@ def execute_atomic_updates(conversation_id, operations):
                 task = op["task"]
                 task_id = task.get("task_id", str(uuid.uuid4()))
                 cur.execute(
-                    "INSERT INTO Tasks (task_id, conversation_id, goal, domain, task_status, context) VALUES (%s, %s, %s, %s, %s, %s)",
+                    "INSERT INTO tasks (task_id, conversation_id, goal, domain, task_status, context) VALUES (%s, %s, %s, %s, %s, %s)",
                     (
                         task_id,
                         str(conversation_id),
