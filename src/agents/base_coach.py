@@ -16,31 +16,13 @@ from src.agents.shared_tools import (
     hand_off_to_triage_agent,
     search_internet,
 )
+from src.agents.utils import convert_to_gemini_message, is_function_terminal
+from src.logging_config import get_logger
 
 load_dotenv()
-
+logger = get_logger(__name__)
 MODEL_CLIENT = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-MODEL_NAME = "gemini-2.0-flash-exp"
-
-
-def convert_to_gemini_message(messages: List[Dict[str, str]]) -> List[types.Content]:
-    """Convert messages to Gemini format.
-
-    Args:
-        messages: List of message dictionaries with 'role' and 'content'
-
-    Returns:
-        List of Gemini Content objects
-    """
-    gemini_messages = []
-    for msg in messages:
-        # Skip system messages as they're handled in the config
-        if msg["role"] == "system":
-            continue
-        # Map roles appropriately
-        role = "user" if msg["role"] == "user" else "model"
-        gemini_messages.append(types.Content(role=role, parts=[types.Part(text=msg["content"])]))
-    return gemini_messages
+MODEL_NAME = "gemini-2.5-flash"
 
 
 class BaseCoach(ABC):
@@ -106,71 +88,50 @@ class BaseCoach(ABC):
                 contents=contents,
                 config=config,
             )
-            # Check if there are function calls
-            if response.function_calls:
-                function_call = response.function_calls[0]
-
-                if function_call.name == "hand_off_to_triage_agent" or function_call.name == "create_artifacts":
-                    return {
-                        "name": function_call.name,
-                        "arguments": function_call.args,
-                    }
-                elif function_call.name == "search_internet":
-                    result = search_internet(query_prompt=function_call.args["query_prompt"])
-                    return {"name": "respond_directly", "arguments": json.dumps({"text": result})}
-                else:
-                    # For other functions (like calculate_training_volume, suggest_exercise_alternatives, search_internet)
-                    # Execute them and pass the result back to the LLM for a final response
-                    function_name = function_call.name
-                    function_args = function_call.args
-
-                    # Find and execute the function
-                    all_tools = self.get_all_tools()
-                    for tool_func in all_tools:
-                        if tool_func.__name__ == function_name:
-                            try:
-                                # Execute the function with the provided arguments
-                                result = tool_func(**function_args)
-
-                                # Create function response part
-                                function_response_part = types.Part.from_function_response(
-                                    name=function_call.name,
-                                    response={"result": result},
-                                )
-
-                                # Append function call and result to contents
-                                contents.append(response.candidates[0].content)  # Append the model's function call
-                                contents.append(
-                                    types.Content(role="user", parts=[function_response_part])
-                                )  # Append the function response
-
-                                # Generate final response with the function result
-                                response = await MODEL_CLIENT.aio.models.generate_content(
-                                    model=MODEL_NAME,
-                                    contents=contents,
-                                    config=config,
-                                )
-
-                                import pdb
-
-                                pdb.set_trace()
-
-                                return {"name": "respond_directly", "arguments": json.dumps({"text": response.text})}
-
-                            except Exception as func_error:
-                                return {
-                                    "name": "respond_directly",
-                                    "arguments": json.dumps(
-                                        {
-                                            "text": f"I encountered an error executing {function_name}: {str(func_error)}"
-                                        }
-                                    ),
-                                }
-
-                    # If function not found, return error
+            while response.function_calls:
+                function_response_parts = []
+                try:
+                    for function_call in response.function_calls:
+                        target_func = [
+                            tool_func for tool_func in self.get_all_tools() if tool_func.__name__ == function_call.name
+                        ][0]
+                        if is_function_terminal(target_func):
+                            logger.info(f"Model called terminal function: {function_call.name}")
+                            if function_call.name == "search_internet":
+                                result = search_internet(query_prompt=function_call.args["query_prompt"])
+                                return {"name": "respond_directly", "arguments": json.dumps({"text": result})}
+                            else:  # hand_off_to_triage_agent and create_artifacts are terminal functions
+                                return {"name": function_call.name, "arguments": json.dumps(function_call.args)}
+                        result = target_func(**function_call.args)
+                        logger.debug(
+                            f"Calling function {function_call.name} with args {function_call.args} and result {result}"
+                        )
+                        function_response_parts.append(
+                            types.Part.from_function_response(
+                                name=function_call.name,
+                                response={"result": result},
+                            )
+                        )
+                        # Append function call and result of the function execution to contents
+                        contents.append(
+                            response.candidates[0].content
+                        )  # Append the content from the model's response.
+                        contents.append(
+                            types.Content(role="user", parts=function_response_parts)
+                        )  # Append the function response
+                        logger.info("Sending follow-up request after get_available_experts")
+                        response = await MODEL_CLIENT.aio.models.generate_content(
+                            model=MODEL_NAME,
+                            contents=contents,
+                            config=config,
+                        )
+                except Exception as e:
+                    logger.error(f"Error processing request: {e}", exc_info=True)
                     return {
                         "name": "respond_directly",
-                        "arguments": json.dumps({"text": f"Unknown function: {function_name}"}),
+                        "arguments": json.dumps(
+                            {"text": f"I encountered an error: {str(e)}. Could you please rephrase your request?"}
+                        ),
                     }
             else:
                 # If no function call, return the text as a direct response

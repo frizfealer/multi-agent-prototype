@@ -102,16 +102,16 @@ def create_task(task_dict):
     """Creates a new task from a dictionary."""
     conn = get_db_connection()
     cur = conn.cursor()
-    
+
     task_id = task_dict.get("task_id", str(uuid.uuid4()))
     conversation_id = task_dict["conversation_id"]
     goal = task_dict["goal"]
     domain = task_dict["domain"]
     task_status = task_dict.get("status", "pending")
     context = json.dumps(task_dict.get("context", {}))
-    
+
     cur.execute(
-        "INSERT INTO Task (task_id, conversation_id, goal, domain, task_status, context) VALUES (%s, %s, %s, %s, %s, %s)",
+        "INSERT INTO Tasks (task_id, conversation_id, goal, domain, task_status, context) VALUES (%s, %s, %s, %s, %s, %s)",
         (task_id, str(conversation_id), goal, domain, task_status, context),
     )
     conn.commit()
@@ -151,26 +151,26 @@ def start_tasks(conversation_id, task_ids=None):
     """Start tasks for a conversation. If task_ids not provided, start all pending tasks."""
     conn = get_db_connection()
     cur = conn.cursor()
-    
+
     if task_ids:
         # Start specific tasks
-        placeholders = ','.join(['%s'] * len(task_ids))
+        placeholders = ",".join(["%s"] * len(task_ids))
         cur.execute(
             f"UPDATE Task SET task_status = 'in_progress', updated_at = CURRENT_TIMESTAMP WHERE conversation_id = %s AND task_id IN ({placeholders})",
-            [str(conversation_id)] + [str(task_id) for task_id in task_ids]
+            [str(conversation_id)] + [str(task_id) for task_id in task_ids],
         )
     else:
         # Start all pending tasks
         cur.execute(
             "UPDATE Task SET task_status = 'in_progress', updated_at = CURRENT_TIMESTAMP WHERE conversation_id = %s AND task_status = 'pending'",
-            (str(conversation_id),)
+            (str(conversation_id),),
         )
-    
+
     conn.commit()
     affected_rows = cur.rowcount
     cur.close()
     conn.close()
-    
+
     return affected_rows
 
 

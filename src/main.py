@@ -1,4 +1,4 @@
-from typing import Optional, List
+from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -9,9 +9,16 @@ from src.state_manager import (
     get_pending_tasks_by_conversation,
     start_tasks,
 )
+from src.logging_config import setup_logging, get_logger
+
+# Set up logging for the application
+setup_logging(log_level="INFO")
+logger = get_logger(__name__)
 
 app = FastAPI()
 orchestrator = Orchestrator()
+
+logger.info("FastAPI application started")
 
 
 class Message(BaseModel):
@@ -31,12 +38,18 @@ async def chat(message: Message):
     conv_id = message.conversation_id
     if conv_id is None:
         conv_id = str(create_conversation())
+        logger.info(f"Created new conversation: {conv_id}")
+    else:
+        logger.info(f"Continuing conversation: {conv_id}")
 
+    logger.debug(f"Received message: {message.message[:100]}...")  # Log first 100 chars
     response = await orchestrator.handle_message(conv_id, message.message)
 
     if "error" in response:
+        logger.error(f"Error in chat endpoint: {response['error']}")
         raise HTTPException(status_code=500, detail=response["error"])
 
+    logger.info(f"Successfully processed message for conversation: {conv_id}")
     return {"conversation_id": conv_id, "response": response.get("response")}
 
 
@@ -46,9 +59,12 @@ async def get_tasks(conversation_id: str):
     Get all pending tasks for a conversation.
     """
     try:
+        logger.info(f"Getting tasks for conversation: {conversation_id}")
         tasks = get_pending_tasks_by_conversation(conversation_id)
+        logger.info(f"Found {len(tasks)} pending tasks")
         return {"conversation_id": conversation_id, "pending_tasks": tasks}
     except Exception as e:
+        logger.error(f"Error getting tasks: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -58,37 +74,38 @@ async def start_conversation_tasks(conversation_id: str, request: StartTasksRequ
     Start tasks for a conversation. User-controlled task execution.
     """
     try:
+        logger.info(f"Starting tasks for conversation: {conversation_id}")
         # Get pending tasks first to show what will be started
         pending_tasks = get_pending_tasks_by_conversation(conversation_id)
-        
+
         if not pending_tasks:
-            return {
-                "conversation_id": conversation_id,
-                "message": "No pending tasks found.",
-                "started_tasks": []
-            }
-        
+            logger.info("No pending tasks found")
+            return {"conversation_id": conversation_id, "message": "No pending tasks found.", "started_tasks": []}
+
         # Start the tasks
         tasks_to_start = request.task_ids if request.task_ids else None
+        logger.info(f"Starting {len(tasks_to_start) if tasks_to_start else 'all'} tasks")
         affected_count = start_tasks(conversation_id, tasks_to_start)
-        
+
         # Get the tasks that were started
         if request.task_ids:
             started_tasks = [task for task in pending_tasks if task["task_id"] in request.task_ids]
         else:
             started_tasks = pending_tasks
-        
+
+        logger.info(f"Successfully started {affected_count} task(s)")
         return {
             "conversation_id": conversation_id,
             "message": f"Started {affected_count} task(s) for generation.",
-            "started_tasks": started_tasks
+            "started_tasks": started_tasks,
         }
-    
+
     except Exception as e:
+        logger.error(f"Error starting tasks: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8001)
